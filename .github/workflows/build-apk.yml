@@ -8,23 +8,91 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Unzip project
-        run: unzip -o Aura.zip -d .
-
-      - uses: actions/setup-java@v4
+      - name: Install Java
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - uses: gradle/actions/setup-gradle@v4
+      - name: Download Apktool
+        run: |
+          wget -O apktool.jar \
+            https://github.com/iBotPeaches/Apktool/releases/latest/download/apktool.jar
 
-      - name: Build debug APK
-        run: cd Aura && gradle assembleDebug
+      - name: Extract project
+        run: |
+          mkdir extracted
+          unzip -q Aura.zip -d extracted
 
-      - uses: actions/upload-artifact@v4
+          echo "=== Extracted files ==="
+          find extracted -maxdepth 3 -type f | head -100
+
+      - name: Locate Apktool project
+        run: |
+          PROJECT=$(find extracted -name apktool.yml -printf '%h\n' | head -1)
+
+          if [ -z "$PROJECT" ]; then
+            echo "::error::No apktool.yml found."
+            echo "This ZIP is not a complete Apktool project."
+            exit 1
+          fi
+
+          echo "PROJECT=$PROJECT" >> "$GITHUB_ENV"
+          echo "Found Apktool project at: $PROJECT"
+
+      - name: Build APK
+        run: |
+          java -jar apktool.jar b "$PROJECT" \
+            -o unsigned.apk \
+            --jobs 4
+
+      - name: Install Android Build Tools
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "build-tools;35.0.0"
+
+      - name: Zipalign
+        run: |
+          "$ANDROID_HOME/build-tools/35.0.0/zipalign" \
+            -p -f 4 \
+            unsigned.apk \
+            aligned.apk
+
+      - name: Generate signing key
+        run: |
+          keytool -genkeypair \
+            -v \
+            -keystore release.jks \
+            -alias release \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass android \
+            -keypass android \
+            -dname "CN=Wavo"
+
+      - name: Sign APK
+        run: |
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
+            --ks release.jks \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --out Wavo-rebuilt.apk \
+            aligned.apk
+
+      - name: Verify APK
+        run: |
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify \
+            --verbose \
+            Wavo-rebuilt.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
         with:
-          name: aura-debug-apk
-          path: Aura/app/build/outputs/apk/debug/app-debug.apk
+          name: Wavo-rebuilt
+          path: Wavo-rebuilt.apk
